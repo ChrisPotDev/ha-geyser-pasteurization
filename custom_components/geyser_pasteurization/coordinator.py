@@ -256,22 +256,16 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         return self._next_due_at is None or now >= self._next_due_at
 
     def _advance_schedule(self, completed_at: datetime) -> None:
-        """Advance the fixed due schedule.
+        """Advance the due schedule after a completed hold.
 
-        Always steps forward in whole `rolling_window_days` increments
-        from the schedule's own previous anchor — never from
-        `completed_at` itself — so the scheduled time-of-day never
-        drifts, regardless of how long a cycle actually took to
-        complete, or why.
+        On-time or late completions step forward in whole windows from
+        the existing anchor, so the schedule keeps its clock time and
+        never drifts with how long a cycle took.
 
-        On-time or late completions (the schedule's due point was
-        already reached) simply advance past `completed_at`. An early,
-        unscheduled completion — e.g. a solar-driven hold that finishes
-        well ahead of the current due point — instead advances only as
-        far as needed to guarantee at least one full window of validity
-        from it, so it doesn't leave a shorter-than-intended gap before
-        the next check. Either way the fixed time-of-day is preserved,
-        since every step is a whole window added to the original anchor.
+        An early completion (e.g. solar finishing a hold before the
+        current due point) moves the schedule to the same clock time on
+        the day that is one window after the completion, rounded down so
+        the gap never exceeds `rolling_window_days`.
         """
         window = timedelta(days=self.rolling_window_days)
         self._schedule_window_days = self.rolling_window_days
@@ -283,10 +277,16 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         if self._next_due_at <= completed_at:
             while self._next_due_at <= completed_at:
                 self._next_due_at += window
-        else:
-            target = completed_at + window
-            while self._next_due_at < target:
-                self._next_due_at += window
+            return
+
+        latest = dt_util.as_local(completed_at + window)
+        anchor = dt_util.as_local(self._next_due_at)
+        candidate = latest.replace(
+            hour=anchor.hour, minute=anchor.minute, second=anchor.second, microsecond=0
+        )
+        if candidate > latest:
+            candidate -= timedelta(days=1)
+        self._next_due_at = dt_util.as_utc(candidate)
 
     # ------------------------------------------------------------------
     # Main update loop
