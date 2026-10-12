@@ -61,7 +61,7 @@ All of these except the two entities can be changed later via **Settings → Dev
 
 ## Time–temperature hold table
 
-Legionella die much faster as the water gets hotter, so a hotter hold needs far less time. The integration doesn't just count minutes at or above the target temperature. It uses a table of equivalent holds. The defaults come from the AS 3498 water-heater standard, whose 60°C row matches the default target and duration:
+Legionella die much faster as the water gets hotter, so a hotter hold needs far less time. The integration doesn't just count minutes at or above the target temperature. It uses a table of equivalent holds. The defaults are commonly cited Legionella kill times: about 32 minutes at 60°C, about 2 minutes at 65°C, and near-instant at 70°C (1 minute is used as a margin). South Africa's SANS 10252-1 only says to store hot water at 55–60°C and gives no hold times, so the 60°C / 32 min base row matches it, and the hotter rows go beyond it. The default table:
 
 | At or above | Counts as a full pasteurization after |
 |---|---|

@@ -27,8 +27,8 @@ CONF_GRID_ON_STATE: Final = "grid_power_on_state"
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_TARGET_TEMP: Final = 60.0
 DEFAULT_REQUIRED_DURATION_MINUTES: Final = 32
-# Shorter equivalent holds at higher temperatures, from the AS 3498
-# time-temperature table whose base row matches the 60°C / 32 min above.
+# Shorter equivalent holds at higher temperatures, from commonly cited
+# Legionella kill times (~32 min at 60°C, ~2 min at 65°C, near-instant at 70°C).
 DEFAULT_HOLD_POINTS: Final = "65:2, 70:1"
 DEFAULT_ROLLING_WINDOW_DAYS: Final = 7
 DEFAULT_MAX_RUNTIME_MINUTES: Final = 180
