@@ -116,6 +116,10 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         self._cycle_runtime_seconds: float = 0.0
         self._last_tick: datetime | None = None
         self._last_temperature: float | None = None
+        # Whether an early (not-yet-due) passive hold may be counted. Starts
+        # disarmed, since a tank that's hot at startup may be mid-way through
+        # a hold that already counted; arms on the next below-target reading.
+        self._passive_armed: bool = False
         self._hold_points_warned: str | None = None
         self._error_message: str | None = None
         self._heater_on: bool = False
@@ -463,17 +467,21 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
             self._grid_blocked = False
 
         at_target = temperature is not None and temperature >= self.target_temperature
+        if temperature is not None and not at_target:
+            self._passive_armed = True
 
-        # Hold-time only ever needs tracking while a cycle is genuinely
-        # required: either one is already under way (Heating/Pasteurizing),
-        # or the rolling window has actually elapsed (Due). Without this
-        # guard, a tank that's still hot right after a successful
-        # completion (very likely, since it just held target) would
-        # immediately re-enter Pasteurizing and complete again — and
-        # again — repeatedly firing completed events for as long as it
-        # stays hot, instead of just staying Compliant.
+        # Hold-time is tracked while a cycle is under way (Heating/
+        # Pasteurizing), while one is due, or — so that solar heating ahead
+        # of the due date still counts and pushes the schedule out — while
+        # compliant, once per heating episode. Being "armed" requires a
+        # confirmed below-target reading since the last completion, so a
+        # tank that's still hot right after completing doesn't immediately
+        # start and complete another hold, firing completed events over and
+        # over for as long as it stays hot.
         overdue = self._is_overdue(now)
-        needs_tracking = at_target and (self._state in ACTIVE_STATES or overdue)
+        needs_tracking = at_target and (
+            self._state in ACTIVE_STATES or overdue or self._passive_armed
+        )
 
         if needs_tracking:
             # Credit the interval at the cooler of its two endpoint
@@ -507,8 +515,9 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
             return
 
         if at_target:
-            # At/above target, but already compliant and not due — nothing
-            # to track or complete; there's no need for another cycle yet.
+            # Still hot from a hold that already counted (or from before a
+            # restart, when it's unknown whether it did) — stay Compliant
+            # until the tank cools below target and re-arms.
             self._state = STATE_COMPLIANT
             return
 
@@ -530,6 +539,16 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
                 _LOGGER.info(
                     "Temperature dropped below target; strict mode reset the cycle timer"
                 )
+            elif not overdue and not self._heater_on:
+                # An early passive hold that fell short. Nothing is due yet,
+                # so don't bank partial progress across separate episodes.
+                _LOGGER.info(
+                    "Early passive hold ended at %.0f%% before completing; "
+                    "discarded since no cycle is due yet",
+                    self._cycle_progress * 100,
+                )
+                self._cycle_progress = 0.0
+                self._cycle_elapsed_seconds = 0.0
             else:
                 _LOGGER.info(
                     "Temperature dropped below target; cycle paused at %.0f%% "
@@ -636,6 +655,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
                 "Geyser reached and held target temperature passively (e.g. via solar); "
                 "marking pasteurization compliant without engaging the heater"
             )
+        self._passive_armed = False
         self._cycle_progress = 0.0
         self._cycle_elapsed_seconds = 0.0
         self._cycle_runtime_seconds = 0.0
@@ -722,6 +742,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         # rather than advancing from whatever the old schedule was.
         self._next_due_at = now + timedelta(days=self.rolling_window_days)
         self._schedule_window_days = self.rolling_window_days
+        self._passive_armed = False
         self._cycle_progress = 0.0
         self._cycle_elapsed_seconds = 0.0
         self._cycle_runtime_seconds = 0.0
@@ -738,7 +759,10 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
             # As in async_reset_timer: only disengage a heater this
             # integration itself engaged, never a passive/solar-driven hold.
             await self._async_set_heater(False)
-        self._state = STATE_DUE
+        # Cancelling can now happen mid early passive hold, while not due;
+        # disarm so the still-hot tank doesn't resume tracking next tick.
+        self._state = self._compute_idle_state(dt_util.utcnow())
+        self._passive_armed = False
         self._cycle_progress = 0.0
         self._cycle_elapsed_seconds = 0.0
         self._cycle_runtime_seconds = 0.0
