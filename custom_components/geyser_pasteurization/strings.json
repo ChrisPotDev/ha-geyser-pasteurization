@@ -9,6 +9,7 @@
           "heater_entity": "Heater control entity",
           "target_temperature": "Target disinfection temperature",
           "required_duration_minutes": "Required continuous duration",
+          "additional_hold_points": "Shorter holds at higher temperatures",
           "rolling_window_days": "Maximum rolling window",
           "max_runtime_minutes": "Maximum failsafe run time",
           "allowed_start_time": "Allowed run window start (optional)",
@@ -21,7 +22,8 @@
           "temperature_sensor": "The sensor reporting the geyser's water temperature.",
           "heater_entity": "The switch, climate, or water_heater entity that engages the electric heating element.",
           "target_temperature": "Water must reach this temperature for disinfection to count.",
-          "required_duration_minutes": "Minutes the temperature must stay at or above target, continuously.",
+          "required_duration_minutes": "Minutes the temperature must stay at or above target. This is the slowest, base row of the hold table.",
+          "additional_hold_points": "Comma-separated temperature:minutes pairs, e.g. \"65:2, 70:1\". Hotter water kills Legionella faster, so time spent at these temperatures counts for proportionally more of a full cycle. Leave blank to use only the target temperature and duration above.",
           "rolling_window_days": "If no valid cycle completes within this many days, a cycle becomes due.",
           "max_runtime_minutes": "Safety cutoff: the heater is disengaged if a cycle runs this long without completing.",
           "allowed_start_time": "Automatic cycles only start after this time of day. Leave blank to allow anytime.",
@@ -32,17 +34,24 @@
         }
       }
     },
+    "error": {
+      "invalid_hold_points": "Use comma-separated temperature:minutes pairs (e.g. \"65:2, 70:1\"). Each must be hotter than the target temperature (up to 80°C) and need less time than every cooler row, including the required duration."
+    },
     "abort": {
       "already_configured": "This temperature sensor and heater combination is already configured."
     }
   },
   "options": {
+    "error": {
+      "invalid_hold_points": "Use comma-separated temperature:minutes pairs (e.g. \"65:2, 70:1\"). Each must be hotter than the target temperature (up to 80°C) and need less time than every cooler row, including the required duration."
+    },
     "step": {
       "init": {
         "title": "Geyser Pasteurization options",
         "data": {
           "target_temperature": "Target disinfection temperature",
           "required_duration_minutes": "Required continuous duration",
+          "additional_hold_points": "Shorter holds at higher temperatures",
           "rolling_window_days": "Maximum rolling window",
           "max_runtime_minutes": "Maximum failsafe run time",
           "allowed_start_time": "Allowed run window start (optional)",
@@ -52,6 +61,7 @@
           "grid_power_on_state": "\"On grid\" state value"
         },
         "data_description": {
+          "additional_hold_points": "Comma-separated temperature:minutes pairs, e.g. \"65:2, 70:1\". Hotter water kills Legionella faster, so time spent at these temperatures counts for proportionally more of a full cycle. Leave blank to use only the target temperature and duration above.",
           "grid_power_sensor": "Any entity reporting your power source. If set, cycles only start or continue while this reports the \"on grid\" value below.",
           "grid_power_on_state": "The exact state value that means \"on grid power\" (e.g. \"on\" or \"Grid\"). Case-insensitive."
         }

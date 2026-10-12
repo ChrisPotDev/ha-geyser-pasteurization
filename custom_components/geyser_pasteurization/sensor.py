@@ -22,6 +22,7 @@ from .const import (
     ATTR_CURRENT_TEMPERATURE,
     ATTR_CYCLE_RUNTIME_MINUTES,
     ATTR_ERROR_MESSAGE,
+    ATTR_HOLD_POINTS,
     ATTR_MAX_RUNTIME_MINUTES,
     ATTR_MINUTES_REMAINING,
     ATTR_NEXT_DUE_AT,
@@ -107,6 +108,7 @@ class GeyserStatusSensor(_GeyserSensorBase):
             ATTR_CURRENT_TEMPERATURE: data.current_temperature,
             ATTR_TARGET_TEMPERATURE: data.target_temperature,
             ATTR_REQUIRED_DURATION_MINUTES: data.required_duration_seconds / 60,
+            ATTR_HOLD_POINTS: _hold_points(data),
             ATTR_ROLLING_WINDOW_DAYS: data.rolling_window_days,
             ATTR_MAX_RUNTIME_MINUTES: data.max_runtime_minutes,
             ATTR_CYCLE_RUNTIME_MINUTES: round(data.cycle_runtime_seconds / 60, 2),
@@ -205,4 +207,9 @@ class GeyserCycleProgressSensor(_GeyserSensorBase):
             ATTR_CYCLE_RUNTIME_MINUTES: round(data.cycle_elapsed_seconds / 60, 2),
             ATTR_MINUTES_REMAINING: round(data.minutes_remaining, 2),
             ATTR_REQUIRED_DURATION_MINUTES: data.required_duration_seconds / 60,
+            ATTR_HOLD_POINTS: _hold_points(data),
         }
+
+
+def _hold_points(data: GeyserPasteurizationData) -> list[dict[str, float]]:
+    return [{"temperature": temp, "minutes": minutes} for temp, minutes in data.hold_table]

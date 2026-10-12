@@ -11,6 +11,7 @@ Hybrid geysers with solar diversion heat opportunistically: whenever there's exc
 ## Features
 
 - Rolling-window compliance tracking (default 7 days) against a configurable target temperature and hold duration (default 60°C for 32 minutes), on a **fixed schedule that never drifts** — see [Fixed due schedule](#fixed-due-schedule) below
+- Hotter water counts for more: a time–temperature table (default 60°C/32 min, 65°C/2 min, 70°C/1 min) gives proportional credit for time spent at higher temperatures — see [Time–temperature hold table](#timetemperature-hold-table) below
 - Recognizes disinfection that happens on its own (e.g. solar diversion reaching target) and won't redundantly run its own active cycle on top of it — see [Passive / solar-driven pasteurization](#passive--solar-driven-pasteurization) below
 - Automatic cycle start when due (optionally restricted to a time-of-day window, e.g. only run overnight), plus a manual trigger button/service
 - A hard failsafe run-time cutoff (default 180 minutes) that disengages the heater and raises an error state if a cycle can't complete
@@ -47,7 +48,8 @@ All configuration is done through the UI. On initial setup you're asked for:
 | Geyser temperature sensor | A `sensor` entity with `device_class: temperature` reporting the geyser's water temperature | — |
 | Heater control entity | A `switch`, `input_boolean`, `climate`, or `water_heater` entity that engages the electric element | — |
 | Target disinfection temperature | Water must reach/hold this temperature (°C) | 60.0 |
-| Required continuous duration | Minutes the temperature must stay at/above target, continuously | 32 |
+| Required continuous duration | Minutes the temperature must stay at/above target — the base (slowest) row of the hold table | 32 |
+| Shorter holds at higher temperatures | Extra `temperature:minutes` rows for the hold table. Leave blank for target/duration only. See [Time–temperature hold table](#timetemperature-hold-table). | `65:2, 70:1` |
 | Maximum rolling window | Days without a valid cycle before the system is marked "due" | 7 |
 | Maximum failsafe run time | Safety cutoff — heater is disengaged and the cycle fails if it runs this long without completing | 180 |
 | Allowed run window (optional) | Restricts *automatic* cycle starts to a time-of-day range (e.g. 02:00–05:00). Manual triggers always bypass this. | none (anytime) |
@@ -56,6 +58,28 @@ All configuration is done through the UI. On initial setup you're asked for:
 | "On grid" state value | The exact state string of the sensor above that means "on grid power" | `on` |
 
 All of these except the two entities can be changed later via **Settings → Devices & Services → Geyser Pasteurization → Configure** (the options flow), without removing and re-adding the integration.
+
+## Time–temperature hold table
+
+Legionella die much faster as the water gets hotter, so a hotter hold needs far less time. The integration doesn't just count minutes at or above the target temperature. It uses a table of equivalent holds. The defaults come from the AS 3498 water-heater standard, whose 60°C row matches the default target and duration:
+
+| At or above | Counts as a full pasteurization after |
+|---|---|
+| 60°C (target temperature) | 32 min (required duration) |
+| 65°C | 2 min |
+| 70°C | 1 min |
+
+The first row is always your configured target temperature and required duration. The extra rows come from the **Shorter holds at higher temperatures** option, written as `65:2, 70:1`. Each extra row must be hotter than the one before it and need less time.
+
+**Partial credit adds up across temperatures.** Each interval at temperature T adds `interval ÷ required time at T` to the cycle's progress, and the cycle completes at 100%. Required time is taken from the hottest row the reading reaches, never interpolated, so 63°C counts at the 60°C rate. For example, 10 minutes at 61°C (10/32 ≈ 31%) followed by 1.5 minutes at 66°C (1.5/2 = 75%) completes the cycle. This matters most for solar diversion, which often pushes the tank well above 60°C for a short while. That excursion now counts in full, instead of the integration topping it up with its own heater.
+
+Each interval is credited at the *cooler* of the readings at its start and end. A rising temperature therefore never earns the faster rate for time before it got there, and the interval in which the tank first crosses the target earns nothing.
+
+`sensor.geyser_cycle_progress` reports the percentage, and its `minutes_remaining` attribute estimates the time left at the current temperature. The status and progress sensors both show the active table in a `hold_points` attribute.
+
+> **Sensor placement caveat:** the reading comes from wherever your sensor sits, usually the thermostat pocket, not the coolest water at the bottom of the tank. A brief spike to 70°C at the sensor doesn't prove the whole tank got there, while a long hold at 60°C is more forgiving of stratification. If you're unsure how well your tank mixes, clear the **Shorter holds at higher temperatures** field so only the target temperature and duration count.
+
+If you're upgrading from a version without this option, the default `65:2, 70:1` rows apply automatically. If your target temperature or duration isn't the default, any default row that isn't hotter and shorter than your base row is ignored, and a warning is logged.
 
 ## Fixed due schedule
 
@@ -166,8 +190,8 @@ Listen for these in automations to hook up mobile notifications, dashboards, or 
 
 | Event | Fired when | Data |
 |---|---|---|
-| `geyser_pasteurization_started` | The integration engages its own heater (never fires for a purely passive/solar hold) | `entry_id`, `target_temperature`, `required_duration_minutes`, `banked_hold_seconds` (any passive hold-time already accumulated before engaging) |
-| `geyser_pasteurization_completed` | A hold at/above target completes for the required duration | `entry_id`, `completed_at`, `duration_seconds`, `heater_engaged` (`false` if fully passive/solar-driven), `next_due_at` (the newly advanced fixed schedule point) |
+| `geyser_pasteurization_started` | The integration engages its own heater (never fires for a purely passive/solar hold) | `entry_id`, `target_temperature`, `required_duration_minutes`, `hold_points` (the active time–temperature table), `banked_hold_seconds` and `banked_progress_percent` (any passive hold already accumulated before engaging) |
+| `geyser_pasteurization_completed` | A hold at/above target reaches 100% progress per the [hold table](#timetemperature-hold-table) | `entry_id`, `completed_at`, `duration_seconds` (actual time spent at/above target), `heater_engaged` (`false` if fully passive/solar-driven), `next_due_at` (the newly advanced fixed schedule point) |
 | `geyser_pasteurization_failed` | The integration's own heater-engaged runtime exceeds the failsafe without completing | `entry_id`, `reason`, `failed_at` |
 
 Example automation — notify on failure:

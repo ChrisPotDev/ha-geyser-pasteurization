@@ -23,6 +23,7 @@ from .const import (
     CONF_GRID_ON_STATE,
     CONF_GRID_SENSOR,
     CONF_HEATER_ENTITY,
+    CONF_HOLD_POINTS,
     CONF_MAX_RUNTIME,
     CONF_REQUIRED_DURATION,
     CONF_ROLLING_WINDOW,
@@ -30,6 +31,7 @@ from .const import (
     CONF_TARGET_TEMP,
     CONF_TEMP_SENSOR,
     DEFAULT_GRID_ON_STATE,
+    DEFAULT_HOLD_POINTS,
     DEFAULT_MAX_RUNTIME_MINUTES,
     DEFAULT_REQUIRED_DURATION_MINUTES,
     DEFAULT_ROLLING_WINDOW_DAYS,
@@ -45,6 +47,26 @@ from .const import (
     MIN_ROLLING_WINDOW_DAYS,
     MIN_TARGET_TEMP,
 )
+from .hold_points import build_hold_table, format_hold_points, parse_hold_points
+
+
+def _normalize_hold_points(user_input: dict[str, Any]) -> str | None:
+    """Validate the additional hold points in place.
+
+    Stores the normalized text back into `user_input` (always present, even
+    when cleared) and returns an error key, or None if valid.
+    """
+    try:
+        extra = parse_hold_points(user_input.get(CONF_HOLD_POINTS))
+    except ValueError:
+        return "invalid_hold_points"
+    _, rejected = build_hold_table(
+        float(user_input[CONF_TARGET_TEMP]), float(user_input[CONF_REQUIRED_DURATION]), extra
+    )
+    if rejected or any(temp > MAX_TARGET_TEMP for temp, _ in extra):
+        return "invalid_hold_points"
+    user_input[CONF_HOLD_POINTS] = format_hold_points(sorted(extra))
+    return None
 
 
 def _shared_schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -74,6 +96,14 @@ def _shared_schema(defaults: dict[str, Any]) -> vol.Schema:
                     mode=NumberSelectorMode.BOX,
                 )
             ),
+            # suggested_value rather than default, so clearing the field
+            # really means "no additional rows" instead of reverting.
+            vol.Optional(
+                CONF_HOLD_POINTS,
+                description={
+                    "suggested_value": defaults.get(CONF_HOLD_POINTS, DEFAULT_HOLD_POINTS)
+                },
+            ): TextSelector(),
             vol.Required(
                 CONF_ROLLING_WINDOW,
                 default=defaults.get(CONF_ROLLING_WINDOW, DEFAULT_ROLLING_WINDOW_DAYS),
@@ -135,20 +165,26 @@ class GeyserPasteurizationConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
 
-            data = {
-                CONF_TEMP_SENSOR: user_input[CONF_TEMP_SENSOR],
-                CONF_HEATER_ENTITY: user_input[CONF_HEATER_ENTITY],
-                CONF_TARGET_TEMP: user_input[CONF_TARGET_TEMP],
-                CONF_REQUIRED_DURATION: user_input[CONF_REQUIRED_DURATION],
-                CONF_ROLLING_WINDOW: user_input[CONF_ROLLING_WINDOW],
-                CONF_MAX_RUNTIME: user_input[CONF_MAX_RUNTIME],
-                CONF_ALLOWED_START: user_input.get(CONF_ALLOWED_START),
-                CONF_ALLOWED_END: user_input.get(CONF_ALLOWED_END),
-                CONF_STRICT_RESET: user_input[CONF_STRICT_RESET],
-                CONF_GRID_SENSOR: user_input.get(CONF_GRID_SENSOR),
-                CONF_GRID_ON_STATE: user_input.get(CONF_GRID_ON_STATE, DEFAULT_GRID_ON_STATE),
-            }
-            return self.async_create_entry(title="Geyser Pasteurization", data=data)
+            if error := _normalize_hold_points(user_input):
+                errors[CONF_HOLD_POINTS] = error
+            else:
+                data = {
+                    CONF_TEMP_SENSOR: user_input[CONF_TEMP_SENSOR],
+                    CONF_HEATER_ENTITY: user_input[CONF_HEATER_ENTITY],
+                    CONF_TARGET_TEMP: user_input[CONF_TARGET_TEMP],
+                    CONF_REQUIRED_DURATION: user_input[CONF_REQUIRED_DURATION],
+                    CONF_HOLD_POINTS: user_input[CONF_HOLD_POINTS],
+                    CONF_ROLLING_WINDOW: user_input[CONF_ROLLING_WINDOW],
+                    CONF_MAX_RUNTIME: user_input[CONF_MAX_RUNTIME],
+                    CONF_ALLOWED_START: user_input.get(CONF_ALLOWED_START),
+                    CONF_ALLOWED_END: user_input.get(CONF_ALLOWED_END),
+                    CONF_STRICT_RESET: user_input[CONF_STRICT_RESET],
+                    CONF_GRID_SENSOR: user_input.get(CONF_GRID_SENSOR),
+                    CONF_GRID_ON_STATE: user_input.get(
+                        CONF_GRID_ON_STATE, DEFAULT_GRID_ON_STATE
+                    ),
+                }
+                return self.async_create_entry(title="Geyser Pasteurization", data=data)
 
         schema = vol.Schema(
             {
@@ -161,7 +197,9 @@ class GeyserPasteurizationConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                 ),
             }
-        ).extend(_shared_schema({}).schema)
+        ).extend(_shared_schema(user_input or {}).schema)
+        if user_input is not None:
+            schema = self.add_suggested_values_to_schema(schema, user_input)
 
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
@@ -177,10 +215,14 @@ class GeyserPasteurizationOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage the options."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            if error := _normalize_hold_points(user_input):
+                errors[CONF_HOLD_POINTS] = error
+            else:
+                return self.async_create_entry(title="", data=user_input)
 
-        current = {**self.config_entry.data, **self.config_entry.options}
+        current = {**self.config_entry.data, **self.config_entry.options, **(user_input or {})}
         schema = _shared_schema(current)
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

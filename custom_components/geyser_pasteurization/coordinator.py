@@ -26,6 +26,7 @@ from .const import (
     CONF_GRID_ON_STATE,
     CONF_GRID_SENSOR,
     CONF_HEATER_ENTITY,
+    CONF_HOLD_POINTS,
     CONF_MAX_RUNTIME,
     CONF_REQUIRED_DURATION,
     CONF_ROLLING_WINDOW,
@@ -33,6 +34,7 @@ from .const import (
     CONF_TARGET_TEMP,
     CONF_TEMP_SENSOR,
     DEFAULT_GRID_ON_STATE,
+    DEFAULT_HOLD_POINTS,
     DEFAULT_MAX_RUNTIME_MINUTES,
     DEFAULT_REQUIRED_DURATION_MINUTES,
     DEFAULT_ROLLING_WINDOW_DAYS,
@@ -51,6 +53,13 @@ from .const import (
     STATE_PASTEURIZING,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
+)
+from .hold_points import (
+    HoldPoint,
+    build_hold_table,
+    format_hold_points,
+    parse_hold_points,
+    required_seconds,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,6 +80,7 @@ class GeyserPasteurizationData:
     cycle_runtime_seconds: float
     cycle_progress_percent: float
     required_duration_seconds: float
+    hold_table: list[HoldPoint]
     rolling_window_days: int
     max_runtime_minutes: int
     minutes_remaining: float
@@ -98,9 +108,15 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         self._last_pasteurization: datetime | None = None
         self._next_due_at: datetime | None = None
         self._schedule_window_days: int | None = None
+        # Fraction of a full pasteurization achieved so far (0.0-1.0),
+        # weighted by the time-temperature table. Elapsed seconds are kept
+        # alongside it purely for reporting.
+        self._cycle_progress: float = 0.0
         self._cycle_elapsed_seconds: float = 0.0
         self._cycle_runtime_seconds: float = 0.0
         self._last_tick: datetime | None = None
+        self._last_temperature: float | None = None
+        self._hold_points_warned: str | None = None
         self._error_message: str | None = None
         self._heater_on: bool = False
         self._temp_unavailable_logged: bool = False
@@ -134,6 +150,34 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
     @property
     def required_duration_seconds(self) -> float:
         return self.required_duration_minutes * 60.0
+
+    @property
+    def hold_table(self) -> list[HoldPoint]:
+        """The base target/duration row plus any shorter, hotter rows."""
+        text = self._option(CONF_HOLD_POINTS, DEFAULT_HOLD_POINTS)
+        try:
+            extra = parse_hold_points(text)
+        except ValueError as err:
+            extra = []
+            self._warn_hold_points(text, f"could not be parsed ({err})")
+        table, rejected = build_hold_table(
+            self.target_temperature, self.required_duration_minutes, extra
+        )
+        if rejected:
+            # Possible when an install predating this option keeps the
+            # default rows against a non-default base row. The flows reject
+            # this outright; here the offending rows are simply ignored.
+            self._warn_hold_points(
+                text,
+                f"ignoring {format_hold_points(rejected)}: each row must be hotter "
+                "than the target temperature and need less time than the row below it",
+            )
+        return table
+
+    def _warn_hold_points(self, text: str, problem: str) -> None:
+        if self._hold_points_warned != text:
+            _LOGGER.warning("Additional hold points %r %s", text, problem)
+            self._hold_points_warned = text
 
     @property
     def rolling_window_days(self) -> int:
@@ -302,15 +346,13 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         if self._last_pasteurization is not None:
             days_since = (now - self._last_pasteurization).total_seconds() / 86400
 
-        progress = 0.0
-        if self.required_duration_seconds > 0:
-            progress = min(
-                100.0, (self._cycle_elapsed_seconds / self.required_duration_seconds) * 100
-            )
+        hold_table = self.hold_table
+        progress = min(100.0, self._cycle_progress * 100)
 
-        minutes_remaining = max(
-            0.0, (self.required_duration_seconds - self._cycle_elapsed_seconds) / 60
-        )
+        # Estimated at the current temperature, or at the base row when
+        # below it, so the estimate shrinks as the tank gets hotter.
+        rate_seconds = required_seconds(hold_table, temperature) or self.required_duration_seconds
+        minutes_remaining = max(0.0, (1.0 - self._cycle_progress) * rate_seconds / 60)
 
         return GeyserPasteurizationData(
             state=self._state,
@@ -324,6 +366,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
             cycle_runtime_seconds=self._cycle_runtime_seconds,
             cycle_progress_percent=progress,
             required_duration_seconds=self.required_duration_seconds,
+            hold_table=hold_table,
             rolling_window_days=self.rolling_window_days,
             max_runtime_minutes=self.max_runtime_minutes,
             minutes_remaining=minutes_remaining,
@@ -395,11 +438,17 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         cycle can complete — or be well under way — without the integration
         ever having turned the heater on, and it will not redundantly start
         its own active cycle while the tank is already at/above target.
+
+        Hotter water counts for more: each interval adds
+        `interval / required_seconds(T)` to the cycle progress, per the
+        time-temperature hold table, and the cycle completes at 1.0.
         """
         elapsed = 0.0
         if self._last_tick is not None:
             elapsed = max(0.0, (now - self._last_tick).total_seconds())
         self._last_tick = now
+        previous_temperature = self._last_temperature
+        self._last_temperature = temperature
 
         if self._state == STATE_FAILED:
             return  # Remains until manually acknowledged/reset.
@@ -427,12 +476,25 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         needs_tracking = at_target and (self._state in ACTIVE_STATES or overdue)
 
         if needs_tracking:
-            self._cycle_elapsed_seconds += elapsed
+            # Credit the interval at the cooler of its two endpoint
+            # readings, so a rising temperature never earns the hotter
+            # rate for time spent before it got there. An interval that
+            # started below target earns nothing.
+            interval_temperature = (
+                temperature
+                if previous_temperature is None
+                else min(temperature, previous_temperature)
+            )
+            rate_seconds = required_seconds(self.hold_table, interval_temperature)
+            if rate_seconds:
+                self._cycle_progress += elapsed / rate_seconds
+                self._cycle_elapsed_seconds += elapsed
             if self._heater_on:
                 self._cycle_runtime_seconds += elapsed
                 if await self._async_check_failsafe(now):
                     return
-            if self._cycle_elapsed_seconds >= self.required_duration_seconds:
+            # Tolerance absorbs float rounding across many small intervals.
+            if self._cycle_progress >= 1.0 - 1e-9:
                 await self._async_complete_cycle(now)
                 return
             if self._state != STATE_PASTEURIZING:
@@ -461,15 +523,18 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         # Temperature is confirmed below target. Only log/react to the
         # *transition* (state was still Pasteurizing as of the last tick);
         # otherwise this would log on every poll while parked below target.
-        if self._state == STATE_PASTEURIZING and self._cycle_elapsed_seconds > 0:
+        if self._state == STATE_PASTEURIZING and self._cycle_progress > 0:
             if self.strict_reset:
+                self._cycle_progress = 0.0
                 self._cycle_elapsed_seconds = 0.0
                 _LOGGER.info(
                     "Temperature dropped below target; strict mode reset the cycle timer"
                 )
             else:
                 _LOGGER.info(
-                    "Temperature dropped below target; cycle timer paused at %.1f minutes",
+                    "Temperature dropped below target; cycle paused at %.0f%% "
+                    "(%.1f minutes held)",
+                    self._cycle_progress * 100,
                     self._cycle_elapsed_seconds / 60,
                 )
 
@@ -510,7 +575,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
     # State transitions
     # ------------------------------------------------------------------
     async def _async_start_cycle(self, now: datetime) -> None:
-        # Deliberately does not reset cycle_elapsed_seconds: any hold-time
+        # Deliberately does not reset cycle progress: any hold-time
         # already banked (e.g. from a prior solar-driven excursion that
         # didn't quite finish) still counts toward this cycle. Only the
         # failsafe runtime clock resets, since that tracks a fresh attempt
@@ -527,16 +592,23 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
                 "entry_id": self.entry.entry_id,
                 "target_temperature": self.target_temperature,
                 "required_duration_minutes": self.required_duration_minutes,
+                "hold_points": self._hold_points_attribute(),
                 "banked_hold_seconds": self._cycle_elapsed_seconds,
+                "banked_progress_percent": round(self._cycle_progress * 100, 1),
             },
         )
-        if self._cycle_elapsed_seconds > 0:
+        if self._cycle_progress > 0:
             _LOGGER.info(
-                "Starting geyser pasteurization cycle (%.1f minutes of hold time already banked)",
-                self._cycle_elapsed_seconds / 60,
+                "Starting geyser pasteurization cycle (%.0f%% already banked)",
+                self._cycle_progress * 100,
             )
         else:
             _LOGGER.info("Starting geyser pasteurization cycle")
+
+    def _hold_points_attribute(self) -> list[dict[str, float]]:
+        return [
+            {"temperature": temp, "minutes": minutes} for temp, minutes in self.hold_table
+        ]
 
     async def _async_complete_cycle(self, now: datetime) -> None:
         self._state = STATE_COMPLIANT
@@ -564,6 +636,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
                 "Geyser reached and held target temperature passively (e.g. via solar); "
                 "marking pasteurization compliant without engaging the heater"
             )
+        self._cycle_progress = 0.0
         self._cycle_elapsed_seconds = 0.0
         self._cycle_runtime_seconds = 0.0
 
@@ -649,6 +722,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
         # rather than advancing from whatever the old schedule was.
         self._next_due_at = now + timedelta(days=self.rolling_window_days)
         self._schedule_window_days = self.rolling_window_days
+        self._cycle_progress = 0.0
         self._cycle_elapsed_seconds = 0.0
         self._cycle_runtime_seconds = 0.0
         self._error_message = None
@@ -665,6 +739,7 @@ class GeyserPasteurizationCoordinator(DataUpdateCoordinator[GeyserPasteurization
             # integration itself engaged, never a passive/solar-driven hold.
             await self._async_set_heater(False)
         self._state = STATE_DUE
+        self._cycle_progress = 0.0
         self._cycle_elapsed_seconds = 0.0
         self._cycle_runtime_seconds = 0.0
         self._grid_blocked = False

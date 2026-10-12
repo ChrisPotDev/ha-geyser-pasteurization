@@ -15,6 +15,7 @@ CONF_TEMP_SENSOR: Final = "temperature_sensor"
 CONF_HEATER_ENTITY: Final = "heater_entity"
 CONF_TARGET_TEMP: Final = "target_temperature"
 CONF_REQUIRED_DURATION: Final = "required_duration_minutes"
+CONF_HOLD_POINTS: Final = "additional_hold_points"
 CONF_ROLLING_WINDOW: Final = "rolling_window_days"
 CONF_MAX_RUNTIME: Final = "max_runtime_minutes"
 CONF_ALLOWED_START: Final = "allowed_start_time"
@@ -26,6 +27,9 @@ CONF_GRID_ON_STATE: Final = "grid_power_on_state"
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_TARGET_TEMP: Final = 60.0
 DEFAULT_REQUIRED_DURATION_MINUTES: Final = 32
+# Shorter equivalent holds at higher temperatures, from the AS 3498
+# time-temperature table whose base row matches the 60°C / 32 min above.
+DEFAULT_HOLD_POINTS: Final = "65:2, 70:1"
 DEFAULT_ROLLING_WINDOW_DAYS: Final = 7
 DEFAULT_MAX_RUNTIME_MINUTES: Final = 180
 DEFAULT_STRICT_RESET: Final = False
@@ -93,3 +97,4 @@ ATTR_MINUTES_REMAINING: Final = "minutes_remaining"
 ATTR_ON_GRID_POWER: Final = "on_grid_power"
 ATTR_PAUSED_REASON: Final = "paused_reason"
 ATTR_NEXT_DUE_AT: Final = "next_due_at"
+ATTR_HOLD_POINTS: Final = "hold_points"
